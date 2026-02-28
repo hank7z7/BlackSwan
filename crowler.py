@@ -2,7 +2,9 @@ from playwright.sync_api import sync_playwright
 import time
 from datetime import datetime
 from adb_controlloer import BlueStacksController
+from ocr_engine import OCREngine
 import random
+import re
 
 def check_target_status(url: str) -> dict:
     """Navigate to a profile page and return a summary dict.
@@ -85,19 +87,24 @@ if __name__ == "__main__":
 
     # intervals
     CHECK_INTERVAL = 300  # seconds (5 minutes) -> fetch statuses
-    SEND_INTERVAL = 60    # seconds (1 minute)  -> send messages to online accounts
+    SEND_INTERVAL = 90    # seconds (1 minute)  -> send messages to online accounts
 
     # create the adb controller once
     controller = BlueStacksController()
+    # create OCR engine (uses adb to capture screen)
+    ocr = OCREngine()
 
-    # track last send timestamp per account key
+    # track last send timestamp per account (by code or url)
     last_sent: dict[str, float] = {}
+
+    # record last OCR-detected channel per account (by code or url)
+    last_channel: dict[str, str] = {}
 
     # latest known statuses (url -> info dict)
     statuses: dict[str, dict] = {}
 
     print(f"[+] starting monitor: fetch every {CHECK_INTERVAL}s, send every {SEND_INTERVAL}s")
-
+    next_check_at = 0.0
     next_check_at = 0.0
     while True:
         now = time.time()
@@ -119,12 +126,12 @@ if __name__ == "__main__":
             online = bool(info.get("online"))
             name = info.get("name") or ""
             code = info.get("code") or ""
-            key = code or url
+            account_id = code or url
 
             if online:
-                last = last_sent.get(key, 0.0)
+                last = last_sent.get(account_id, 0.0)
                 if now - last >= SEND_INTERVAL:
-                    now_str = datetime.now().strftime("%Y%m%d%H%M")
+                    now_str = datetime.now().strftime("%m%d%H%M")
                     cmd_part = f"/w {name}{code}"
                     time_part = now_str
                     print(f"[*] {name} ({code}) online — sending: {cmd_part} | {time_part}")
@@ -133,17 +140,26 @@ if __name__ == "__main__":
                         controller.random_delay(800, 1600)
                         controller.send_message(time_part)
                         # record last send timestamp
-                        last_sent[key] = now
+                        last_sent[account_id] = now
+
+                        # Immediately attempt to verify via OCR on-screen using OCREngine helper
+                        print("[*] Capturing screen to verify timestamp via OCREngine.find_channel_for_code...")
+                        found, chan, raw = ocr.find_channel_for_code(code, expected_ts=time_part, retries=3, delay_s=1.0)
+                        if found:
+                            last_channel[account_id] = chan
+                            print(f"[+] OCR verification succeeded for {account_id}: channel={chan}")
+                        else:
+                            print(f"[-] OCR verification failed for {account_id}.")
                     except Exception as e:
-                        print(f"[!] error sending to {key}: {e}")
+                        print(f"[!] error sending to {account_id}: {e}")
                 else:
                     # still within send interval
                     pass
             else:
                 # account offline — clear last_sent so next online triggers immediate send
-                if key in last_sent:
+                if account_id in last_sent:
                     print(f"[*] {name} ({code}) went offline — clearing send timer")
-                    last_sent.pop(key, None)
+                    last_sent.pop(account_id, None)
 
         # small sleep to avoid busy loop; main actions are scheduled above
         time.sleep(1)

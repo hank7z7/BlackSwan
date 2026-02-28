@@ -1,6 +1,14 @@
 import subprocess
 import time
 import random
+import sys
+
+# Ensure console output uses UTF-8 on Windows terminals
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 
 # [!] Replace this with the full absolute path to adb.exe in your scrcpy folder
 ADB_PATH = r"C:\Users\ghank\scrcpy-win64-v3.3.4\scrcpy-win64-v3.3.4\adb.exe"
@@ -19,9 +27,30 @@ def _get_first_device() -> str | None:
 
 
 class BlueStacksController:
-    def __init__(self, device_id: str | None = None):
-        # if no id provided, look up connected device
-        self.device_id = device_id or _get_first_device()
+    def __init__(self, device_id: str | None = None, adb_address: str | None = None):
+        """Initialize controller.
+
+        Args:
+            device_id: Optional explicit adb device id (example: 'emulator-5554' or '127.0.0.1:5555').
+            adb_address: Optional adb TCP address to connect to (example: '127.0.0.1:5555').
+
+        If `adb_address` is provided we attempt `adb connect <adb_address>` and use
+        that address as the device id. If neither is provided we auto-detect the
+        first available device from `adb devices`.
+        """
+        # If an adb TCP address was provided, try to connect and use it
+        if adb_address:
+            print(f"[*] attempting adb connect to {adb_address}...")
+            try:
+                subprocess.run([ADB_PATH, "connect", adb_address], capture_output=True, text=True, timeout=5)
+            except Exception as e:
+                print(f"[!] adb connect failed: {e}")
+            # prefer explicit device_id if given, otherwise use the adb_address
+            self.device_id = device_id or adb_address
+        else:
+            # if no id provided, look up connected device
+            self.device_id = device_id or _get_first_device()
+
         if not self.device_id:
             raise RuntimeError("no ADB device found; make sure emulator is running and adb devices lists it")
         print(f"[*] using device {self.device_id}")
@@ -65,15 +94,6 @@ class BlueStacksController:
         """
         formatted_text = text.replace(" ", "%s")
         return self._run_adb("shell", "input", "text", formatted_text)
-
-    def press_enter(self) -> bool:
-        """Send Enter key by simulating keydown + keyup (more reliable than keyevent)."""
-        print("[*] sending Enter key (keydown + keyup on KEYCODE_ENTER=66)...")
-        self._run_adb("shell", "input", "keydown", "66")
-        time.sleep(0.05)
-        self._run_adb("shell", "input", "keyup", "66")
-        print("[+] Enter key sequence sent")
-        return True
 
     def set_clipboard(self, text: str):
         """Store a string in the emulator's clipboard using clipper broadcast.
@@ -190,28 +210,28 @@ class BlueStacksController:
             tap_y = default_input_y
 
         if tap_x is not None and tap_y is not None:
-            print(f"[1/4] Tapping input field at ({tap_x}, {tap_y})...")
+            # print(f"[1/4] Tapping input field at ({tap_x}, {tap_y})...")
             self.human_tap(tap_x, tap_y)
             self.random_delay(400, 800)
-            print("[+] Input field tapped")
+            # print("[+] Input field tapped")
 
-        print("[2/5] Setting Windows clipboard...")
+        # print("[2/5] Setting Windows clipboard...")
         self.set_windows_clipboard(message)
         self.random_delay(200, 400)
-        print("[+] Clipboard set")
+        # print("[+] Clipboard set")
 
-        print("[3/5] Pasting message...")
+        # print("[3/5] Pasting message...")
         self.paste_from_clipboard()
         self.random_delay(300, 600)
-        print("[+] Paste sent")
+        # print("[+] Paste sent")
 
         # instead of tapping the send button, press enter in the input field
-        print("[4/5] Pressing Enter to send message...")
+        # print("[4/5] Pressing Enter to send message...")
         self.human_tap(send_button_x, send_button_y)
         self.random_delay(500, 1000)
-        print("[+] Enter pressed, message should be sent")
+        # print("[+] Enter pressed, message should be sent")
 
-        print("[5/5] Message sent\n")
+        # print("[5/5] Message sent\n")
         return True
 
 
