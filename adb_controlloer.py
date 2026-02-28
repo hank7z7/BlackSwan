@@ -1,5 +1,6 @@
 import subprocess
 import time
+import random
 
 # [!] Replace this with the full absolute path to adb.exe in your scrcpy folder
 ADB_PATH = r"C:\Users\ghank\scrcpy-win64-v3.3.4\scrcpy-win64-v3.3.4\adb.exe"
@@ -87,6 +88,49 @@ class BlueStacksController:
         """Run a raw adb shell command for testing/debugging."""
         return self._run_adb("shell", *cmd_parts)
 
+    def random_delay(self, min_ms: float = 300, max_ms: float = 800) -> None:
+        """Sleep for a random duration to simulate human behavior.
+        
+        Args:
+            min_ms: Minimum delay in milliseconds (default 300)
+            max_ms: Maximum delay in milliseconds (default 800)
+        """
+        delay_seconds = random.uniform(min_ms, max_ms) / 1000.0
+        time.sleep(delay_seconds)
+
+    def human_tap(self, x: int, y: int, hold_min_ms: int = 50, hold_max_ms: int = 150) -> bool:
+        """Perform a human-like tap with random duration and small movement.
+        
+        Simulates a realistic touch by:
+        - Adding small random movement (drift)
+        - Holding for a variable duration
+        - Releasing naturally
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            hold_min_ms: Minimum hold duration in milliseconds
+            hold_max_ms: Maximum hold duration in milliseconds
+            
+        Returns:
+            True if successful
+        """
+        # Add small random drift (±5 pixels)
+        drift_x = random.randint(-5, 5)
+        drift_y = random.randint(-5, 5)
+        tap_x = x + drift_x
+        tap_y = y + drift_y
+        
+        print(f"[*] human tap at ({tap_x}, {tap_y}) with drift ({drift_x}, {drift_y})")
+        
+        # Random hold duration
+        hold_ms = random.randint(hold_min_ms, hold_max_ms)
+        hold_seconds = hold_ms / 1000.0
+        
+        # Send touch down
+        self._run_adb("shell", "input", "touchscreen", "swipe", str(tap_x), str(tap_y), str(tap_x), str(tap_y), str(hold_ms))
+        return True
+
     def test_keyboard_input(self):
         """Send individual keystrokes to test if input works at all."""
         print("[*] testing keyboard input: sending 'a' 'b' 'c'...")
@@ -121,7 +165,7 @@ class BlueStacksController:
         return True
 
     def send_message(self, message: str, tap_x: int | None = None, tap_y: int | None = None) -> bool:
-        """High-level method: tap (optional) → set clipboard → paste → enter.
+        """High-level method: tap (optional) → set clipboard → paste → enter (all human-like).
 
         Args:
             message: Text to send
@@ -132,20 +176,19 @@ class BlueStacksController:
             True if successful
         """
         if tap_x is not None and tap_y is not None:
-            print(f"[*] tapping ({tap_x}, {tap_y}) to focus input field...")
-            self.tap(tap_x, tap_y)
-            time.sleep(0.5)
+            self.human_tap(tap_x, tap_y)
+            self.random_delay(400, 800)  # Human reaction time
 
         self.set_windows_clipboard(message)
-        time.sleep(0.2)
+        self.random_delay(200, 400)  # Brief pause after setting clipboard
 
         print("[*] pasting message...")
         self.paste_from_clipboard()
-        time.sleep(0.3)
+        self.random_delay(300, 600)  # Pause after paste
 
         print("[*] sending message (Enter)...")
         self.press_enter()
-        time.sleep(0.3)
+        self.random_delay(500, 1000)  # Wait for message to send
 
         print("[+] message sent!\n")
         return True
