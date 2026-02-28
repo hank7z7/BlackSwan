@@ -1,5 +1,8 @@
 from playwright.sync_api import sync_playwright
 import time
+from datetime import datetime
+from adb_controlloer import BlueStacksController
+import random
 
 def check_target_status(url: str) -> dict:
     """Navigate to a profile page and return a summary dict.
@@ -48,7 +51,7 @@ def check_target_status(url: str) -> dict:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def check_multiple_status(urls: list[str], max_workers: int = 5) -> dict[str, dict]:
+def check_multiple_status(urls: list[str], max_workers: int = 6) -> dict[str, dict]:
     """Check a list of profile URLs in parallel and return a mapping of URL->result dict.
 
     Each result dictionary contains the keys produced by :func:`check_target_status`.
@@ -68,8 +71,9 @@ def check_multiple_status(urls: list[str], max_workers: int = 5) -> dict[str, di
     return results
 
 
+# when run as script we start the monitoring service
 if __name__ == "__main__":
-    # list of targets to check
+    # configuration
     targets = [
         # 芭蕾玲娜#aHe5L (Cleric)
         "https://maplestoryworlds.nexon.com/profile/aHe5L",
@@ -81,12 +85,47 @@ if __name__ == "__main__":
         "https://maplestoryworlds.nexon.com/profile/9OqUI",
         # 蘭若度母#1bLtH (Assassin)
         "https://maplestoryworlds.nexon.com/profile/1bLtH",
+        # 漢娜醬晚餐吃筍絲弩肉飯#00TPK (Crossbowman)
+        "https://maplestoryworlds.nexon.com/profile/00TPK",
     ]
 
-    statuses = check_multiple_status(targets, max_workers=5)
-    for url, info in statuses.items():
-        state = "ONLINE" if info.get("online") else "OFFLINE"
-        name = info.get("name") or "<unknown>"
-        code = info.get("code") or "<unknown>"
-        print(f"{url}  |  name={name}  code={code}  --> {state}")
-    # You can test this right now in your terminal!
+    # how often to poll (seconds)
+    CHECK_INTERVAL = 300  # 5 minutes
+
+    # create the adb controller once
+    controller = BlueStacksController()
+
+    # keep track of which accounts we've messaged while they're online
+    seen_online: set[str] = set()
+
+    print("[+] starting monitor, checking every {} seconds".format(CHECK_INTERVAL))
+    while True:
+        statuses = check_multiple_status(targets, max_workers=5)
+        now_str = datetime.now().strftime("%Y%m%d%H%M")
+        for url, info in statuses.items():
+            online = info.get("online")
+            name = info.get("name") or ""
+            code = info.get("code") or ""
+            key = code or url
+            if online:
+                if key not in seen_online:
+                    cmd_part = f"/w {name}{code}"
+                    time_part = now_str
+                    print(f"[*] {name} ({code}) just came online; sending: {cmd_part} | {time_part}")
+                    controller.send_message(cmd_part)
+                    controller.random_delay(1000, 2000)
+                    controller.send_message(time_part)
+                    controller.random_delay(500, 1000)
+                    seen_online.add(key)
+                else:
+                    print(f"[*] {name} ({code}) still online, already messaged")
+            else:
+                if key in seen_online:
+                    print(f"[*] {name} ({code}) went offline, clearing state")
+                    seen_online.discard(key)
+        # sleep a little bit randomised to avoid perfect 5-minute marks
+        jitter = random.uniform(-10, 10)
+        sleep_time = max(0, CHECK_INTERVAL + jitter)
+        print(f"[+] sleeping {sleep_time:.1f}s before next check\n")
+        time.sleep(sleep_time)
+    # service runs indefinitely
