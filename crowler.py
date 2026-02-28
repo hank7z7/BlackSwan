@@ -75,57 +75,75 @@ def check_multiple_status(urls: list[str], max_workers: int = 6) -> dict[str, di
 if __name__ == "__main__":
     # configuration
     targets = [
-        # 芭蕾玲娜#aHe5L (Cleric)
         "https://maplestoryworlds.nexon.com/profile/aHe5L",
-        # 嗵嗵#ayhlH (Crossbowman)
         "https://maplestoryworlds.nexon.com/profile/ayhlH",
-        # Ballerina#clVnJ (Gunslinger)
         "https://maplestoryworlds.nexon.com/profile/clVnJ",
-        # 超渡我#9OqUI (Page)
         "https://maplestoryworlds.nexon.com/profile/9OqUI",
-        # 蘭若度母#1bLtH (Assassin)
         "https://maplestoryworlds.nexon.com/profile/1bLtH",
-        # 漢娜醬晚餐吃筍絲弩肉飯#00TPK (Crossbowman)
         "https://maplestoryworlds.nexon.com/profile/00TPK",
     ]
 
-    # how often to poll (seconds)
-    CHECK_INTERVAL = 300  # 5 minutes
+    # intervals
+    CHECK_INTERVAL = 300  # seconds (5 minutes) -> fetch statuses
+    SEND_INTERVAL = 60    # seconds (1 minute)  -> send messages to online accounts
 
     # create the adb controller once
     controller = BlueStacksController()
 
-    # keep track of which accounts we've messaged while they're online
-    seen_online: set[str] = set()
+    # track last send timestamp per account key
+    last_sent: dict[str, float] = {}
 
-    print("[+] starting monitor, checking every {} seconds".format(CHECK_INTERVAL))
+    # latest known statuses (url -> info dict)
+    statuses: dict[str, dict] = {}
+
+    print(f"[+] starting monitor: fetch every {CHECK_INTERVAL}s, send every {SEND_INTERVAL}s")
+
+    next_check_at = 0.0
     while True:
-        statuses = check_multiple_status(targets, max_workers=5)
-        now_str = datetime.now().strftime("%Y%m%d%H%M")
-        for url, info in statuses.items():
-            online = info.get("online")
+        now = time.time()
+
+        # fetch statuses on schedule
+        if now >= next_check_at:
+            print(f"[*] fetching statuses at {datetime.now().isoformat()}...")
+            try:
+                statuses = check_multiple_status(targets, max_workers=5)
+            except Exception as e:
+                print(f"[!] failed to update statuses: {e}")
+                statuses = {}
+            # schedule next check with small jitter
+            jitter = random.uniform(-5, 5)
+            next_check_at = now + CHECK_INTERVAL + jitter
+
+        # iterate known statuses and send to online accounts every SEND_INTERVAL
+        for url, info in list(statuses.items()):
+            online = bool(info.get("online"))
             name = info.get("name") or ""
             code = info.get("code") or ""
             key = code or url
+
             if online:
-                if key not in seen_online:
+                last = last_sent.get(key, 0.0)
+                if now - last >= SEND_INTERVAL:
+                    now_str = datetime.now().strftime("%Y%m%d%H%M")
                     cmd_part = f"/w {name}{code}"
                     time_part = now_str
-                    print(f"[*] {name} ({code}) just came online; sending: {cmd_part} | {time_part}")
-                    controller.send_message(cmd_part)
-                    controller.random_delay(1000, 2000)
-                    controller.send_message(time_part)
-                    controller.random_delay(500, 1000)
-                    seen_online.add(key)
+                    print(f"[*] {name} ({code}) online — sending: {cmd_part} | {time_part}")
+                    try:
+                        controller.send_message(cmd_part)
+                        controller.random_delay(800, 1600)
+                        controller.send_message(time_part)
+                        # record last send timestamp
+                        last_sent[key] = now
+                    except Exception as e:
+                        print(f"[!] error sending to {key}: {e}")
                 else:
-                    print(f"[*] {name} ({code}) still online, already messaged")
+                    # still within send interval
+                    pass
             else:
-                if key in seen_online:
-                    print(f"[*] {name} ({code}) went offline, clearing state")
-                    seen_online.discard(key)
-        # sleep a little bit randomised to avoid perfect 5-minute marks
-        jitter = random.uniform(-10, 10)
-        sleep_time = max(0, CHECK_INTERVAL + jitter)
-        print(f"[+] sleeping {sleep_time:.1f}s before next check\n")
-        time.sleep(sleep_time)
-    # service runs indefinitely
+                # account offline — clear last_sent so next online triggers immediate send
+                if key in last_sent:
+                    print(f"[*] {name} ({code}) went offline — clearing send timer")
+                    last_sent.pop(key, None)
+
+        # small sleep to avoid busy loop; main actions are scheduled above
+        time.sleep(1)
