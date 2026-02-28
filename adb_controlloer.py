@@ -66,8 +66,14 @@ class BlueStacksController:
         formatted_text = text.replace(" ", "%s")
         return self._run_adb("shell", "input", "text", formatted_text)
 
-    def press_enter(self):
-        return self._run_adb("shell", "input", "keyevent", "66")
+    def press_enter(self) -> bool:
+        """Send Enter key by simulating keydown + keyup (more reliable than keyevent)."""
+        print("[*] sending Enter key (keydown + keyup on KEYCODE_ENTER=66)...")
+        self._run_adb("shell", "input", "keydown", "66")
+        time.sleep(0.05)
+        self._run_adb("shell", "input", "keyup", "66")
+        print("[+] Enter key sequence sent")
+        return True
 
     def set_clipboard(self, text: str):
         """Store a string in the emulator's clipboard using clipper broadcast.
@@ -80,8 +86,9 @@ class BlueStacksController:
             print("[!] clipper broadcast failed; clipboard may not be set")
         return success
 
-    def paste_from_clipboard(self):
+    def paste_from_clipboard(self) -> bool:
         """Send the paste keyevent (KEYCODE_PASTE) to the device."""
+        print("[*] pasting from clipboard (KEYCODE_PASTE 279)...")
         return self._run_adb("shell", "input", "keyevent", "279")
 
     def raw_shell_command(self, *cmd_parts) -> bool:
@@ -99,12 +106,12 @@ class BlueStacksController:
         time.sleep(delay_seconds)
 
     def human_tap(self, x: int, y: int, hold_min_ms: int = 50, hold_max_ms: int = 150) -> bool:
-        """Perform a human-like tap with random duration and small movement.
+        """Perform a human-like tap with random duration and small movement during hold.
         
         Simulates a realistic touch by:
-        - Adding small random movement (drift)
+        - Adding small random drift to starting position (±5 pixels)
+        - Moving slightly while holding (±3 pixels) like hand tremor
         - Holding for a variable duration
-        - Releasing naturally
         
         Args:
             x: X coordinate
@@ -115,20 +122,25 @@ class BlueStacksController:
         Returns:
             True if successful
         """
-        # Add small random drift (±5 pixels)
+        # Add small random drift to starting position (±5 pixels)
         drift_x = random.randint(-5, 5)
         drift_y = random.randint(-5, 5)
         tap_x = x + drift_x
         tap_y = y + drift_y
         
-        print(f"[*] human tap at ({tap_x}, {tap_y}) with drift ({drift_x}, {drift_y})")
+        # Add small movement during hold (hand tremor ±3 pixels)
+        move_x = random.randint(-3, 3)
+        move_y = random.randint(-3, 3)
+        end_x = tap_x + move_x
+        end_y = tap_y + move_y
         
         # Random hold duration
         hold_ms = random.randint(hold_min_ms, hold_max_ms)
-        hold_seconds = hold_ms / 1000.0
         
-        # Send touch down
-        self._run_adb("shell", "input", "touchscreen", "swipe", str(tap_x), str(tap_y), str(tap_x), str(tap_y), str(hold_ms))
+        print(f"[*] human tap at ({tap_x}, {tap_y}) → ({end_x}, {end_y}) hold {hold_ms}ms (drift: {drift_x},{drift_y}, move: {move_x},{move_y})")
+        
+        # Use swipe to simulate tap with movement while holding
+        self._run_adb("shell", "input", "touchscreen", "swipe", str(tap_x), str(tap_y), str(end_x), str(end_y), str(hold_ms))
         return True
 
     def test_keyboard_input(self):
@@ -155,43 +167,53 @@ class BlueStacksController:
             print(f"[!] Failed to set Windows clipboard: {e}")
             return False
 
-    def clear_input_field(self) -> bool:
-        """Clear the currently focused input field (Ctrl+A, then Delete)."""
-        print("[*] clearing input field...")
-        self._run_adb("shell", "input", "keyevent", "29")  # Ctrl+A
-        time.sleep(0.1)
-        self._run_adb("shell", "input", "keyevent", "67")  # KEYCODE_DEL
-        time.sleep(0.1)
-        return True
-
-    def send_message(self, message: str, tap_x: int | None = None, tap_y: int | None = None) -> bool:
-        """High-level method: tap (optional) → set clipboard → paste → enter (all human-like).
+    def send_message(self, message: str, tap_x: int | None = None, tap_y: int | None = None, send_button_x: int = 1839, send_button_y: int = 529) -> bool:
+        """Send a simple message: tap → set clipboard → paste → click send button.
 
         Args:
             message: Text to send
             tap_x: Optional X coordinate to tap first (to focus input field)
             tap_y: Optional Y coordinate to tap first
+            send_button_x: X coordinate of send button (default 1839)
+            send_button_y: Y coordinate of send button (default 529)
 
         Returns:
             True if successful
         """
+        print(f"\n[*] ==> START send_message: {message[:60]}...")
+        
+        # Default input coordinates (used when caller doesn't supply tap_x/tap_y)
+        default_input_x = 350
+        default_input_y = 313
+        if tap_x is None and tap_y is None:
+            tap_x = default_input_x
+            tap_y = default_input_y
+
         if tap_x is not None and tap_y is not None:
+            print(f"[1/4] Tapping input field at ({tap_x}, {tap_y})...")
             self.human_tap(tap_x, tap_y)
-            self.random_delay(400, 800)  # Human reaction time
+            self.random_delay(400, 800)
+            print("[+] Input field tapped")
 
+        print("[2/5] Setting Windows clipboard...")
         self.set_windows_clipboard(message)
-        self.random_delay(200, 400)  # Brief pause after setting clipboard
+        self.random_delay(200, 400)
+        print("[+] Clipboard set")
 
-        print("[*] pasting message...")
+        print("[3/5] Pasting message...")
         self.paste_from_clipboard()
-        self.random_delay(300, 600)  # Pause after paste
+        self.random_delay(300, 600)
+        print("[+] Paste sent")
 
-        print("[*] sending message (Enter)...")
-        self.press_enter()
-        self.random_delay(500, 1000)  # Wait for message to send
+        # instead of tapping the send button, press enter in the input field
+        print("[4/5] Pressing Enter to send message...")
+        self.human_tap(send_button_x, send_button_y)
+        self.random_delay(500, 1000)
+        print("[+] Enter pressed, message should be sent")
 
-        print("[+] message sent!\n")
+        print("[5/5] Message sent\n")
         return True
+
 
 if __name__ == "__main__":
     import time
@@ -210,25 +232,28 @@ if __name__ == "__main__":
     print("[*] Checking Android version...")
     controller.raw_shell_command("getprop", "ro.build.version.release")
 
-    print("\n[*] Wait 2 seconds to switch to game window and open chat...")
-    time.sleep(2)
-
-    TEST_X = 350
-    TEST_Y = 313
+    print("\n[*] Wait 5 seconds to switch to game window and open chat...")
+    time.sleep(5)
 
     # 3. Send first message
     print("\n[=== Sending Message 1 ===]")
-    controller.send_message("/w 芭蕾玲娜#aHe5L hello world 1", TEST_X, TEST_Y)
+    controller.send_message("/w 漢娜醬晚餐吃筍絲弩肉飯#00TPK")
     time.sleep(1)
-
+    controller.send_message("hello world 1")
+    time.sleep(5)
+    
     # 4. Send second message (no need to kill-server)
     print("\n[=== Sending Message 2 ===]")
-    controller.send_message("/w 芭蕾玲娜#aHe5L hello world 2", TEST_X, TEST_Y)
+    controller.send_message("/w 漢娜醬晚餐吃筍絲弩肉飯#00TPK")
     time.sleep(1)
+    controller.send_message("hello world 2")
+    time.sleep(5)
 
     # 5. Send third message
     print("\n[=== Sending Message 3 ===]")
-    controller.send_message("/w 芭蕾玲娜#aHe5L hello world 3", TEST_X, TEST_Y)
+    controller.send_message("/w 漢娜醬晚餐吃筍絲弩肉飯#00TPK")
     time.sleep(1)
+    controller.send_message("hello world 3")
+    time.sleep(5)
 
     print("\n[+] All messages sent!")
