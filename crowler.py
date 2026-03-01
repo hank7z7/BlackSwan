@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 from adb_controlloer import BlueStacksController
 from ocr_engine import OCREngine
+from notifier import update_dashboard
 import random
 import re
 
@@ -82,7 +83,7 @@ if __name__ == "__main__":
         "https://maplestoryworlds.nexon.com/profile/clVnJ",
         "https://maplestoryworlds.nexon.com/profile/9OqUI",
         "https://maplestoryworlds.nexon.com/profile/1bLtH",
-        "https://maplestoryworlds.nexon.com/profile/00TPK",
+        "https://maplestoryworlds.nexon.com/profile/AmvEH",
     ]
 
     # intervals
@@ -113,7 +114,7 @@ if __name__ == "__main__":
         if now >= next_check_at:
             print(f"[*] fetching statuses at {datetime.now().isoformat()}...")
             try:
-                statuses = check_multiple_status(targets, max_workers=5)
+                statuses = check_multiple_status(targets, max_workers=6)
             except Exception as e:
                 print(f"[!] failed to update statuses: {e}")
                 statuses = {}
@@ -131,10 +132,10 @@ if __name__ == "__main__":
             if online:
                 last = last_sent.get(account_id, 0.0)
                 if now - last >= SEND_INTERVAL:
-                    now_str = datetime.now().strftime("%m%d%H%M")
+                    now_str = datetime.now().strftime("%m%d%H%M%S")
                     cmd_part = f"/w {name}{code}"
                     time_part = now_str
-                    print(f"[*] {name} ({code}) online — sending: {cmd_part} | {time_part}")
+                    print(f"[*] ({code}) online, sending msg to {account_id} at {time_part}")
                     try:
                         controller.send_message(cmd_part)
                         controller.random_delay(800, 1600)
@@ -147,9 +148,12 @@ if __name__ == "__main__":
                         found, chan, raw = ocr.find_channel_for_code(code, expected_ts=time_part, retries=3, delay_s=1.0)
                         if found:
                             last_channel[account_id] = chan
-                            print(f"[+] OCR verification succeeded for {account_id}: channel={chan}")
+                            print(f"[+] [{time_part}] OCR verification succeeded for {account_id}: channel={chan}")
+                            update_dashboard(is_online=True, target_name=f"{name}{code}", target_code=code, channel_num=chan)
                         else:
                             print(f"[-] OCR verification failed for {account_id}.")
+                            update_dashboard(is_online=True, target_name=f"{name}{code}", target_code=code, channel_num=None)
+
                     except Exception as e:
                         print(f"[!] error sending to {account_id}: {e}")
                 else:
@@ -158,8 +162,11 @@ if __name__ == "__main__":
             else:
                 # account offline — clear last_sent so next online triggers immediate send
                 if account_id in last_sent:
-                    print(f"[*] {name} ({code}) went offline — clearing send timer")
+                    print(f"[*] {code} went offline — clearing send timer")
                     last_sent.pop(account_id, None)
+                if now - last >= SEND_INTERVAL:
+                    update_dashboard(is_online=False, target_name=f"{name}{code}", target_code=code)
+
 
         # small sleep to avoid busy loop; main actions are scheduled above
         time.sleep(1)
