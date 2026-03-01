@@ -2,6 +2,7 @@ import subprocess
 import time
 import random
 import sys
+import ctypes
 
 # Ensure console output uses UTF-8 on Windows terminals
 try:
@@ -12,18 +13,6 @@ except Exception:
 
 # [!] Replace this with the full absolute path to adb.exe in your scrcpy folder
 ADB_PATH = r"C:\Users\ghank\scrcpy-win64-v3.3.4\scrcpy-win64-v3.3.4\adb.exe"
-
-
-def _get_first_device() -> str | None:
-    """Return the first non-empty device id from `adb devices` output."""
-    proc = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True, encoding='utf-8', errors='replace')
-    lines = proc.stdout.strip().splitlines()
-    # first line is header
-    for line in lines[1:]:
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == "device":
-            return parts[0]
-    return None
 
 
 class BlueStacksController:
@@ -48,8 +37,8 @@ class BlueStacksController:
             # prefer explicit device_id if given, otherwise use the adb_address
             self.device_id = device_id or adb_address
         else:
-            # if no id provided, look up connected device
-            self.device_id = device_id or _get_first_device()
+            # if no id provided, default to emulator-5554
+            self.device_id = device_id or "emulator-5554"
 
         if not self.device_id:
             raise RuntimeError("no ADB device found; make sure emulator is running and adb devices lists it")
@@ -86,29 +75,35 @@ class BlueStacksController:
         return self._run_adb("shell", "input", "tap", str(x), str(y))
 
     def type_text(self, text: str):
-        """Send characters to the device using `input text`.
-
-        This works most of the time but some IMEs/game clients ignore it after the
-        first injection or treat it as physical keyboard input.  If typing stops
-        working you can fall back to the clipboard methods below.
-        """
-        formatted_text = text.replace(" ", "%s")
-        return self._run_adb("shell", "input", "text", formatted_text)
-
-    def set_clipboard(self, text: str):
-        """Store a string in the emulator's clipboard using clipper broadcast.
-
-        Requires Android 10+ or the `clipper` app.  If this fails, try
-        set_clipboard_direct() instead (requires root on some BlueStacks).
-        """
-        success = self._run_adb("shell", "am", "broadcast", "-a", "clipper.set", "-e", "text", text, timeout=10)
-        if not success:
-            print("[!] clipper broadcast failed; clipboard may not be set")
-        return success
-
-    def paste_from_clipboard(self) -> bool:
-        """Send the paste keyevent (KEYCODE_PASTE) to the device."""
-        print("[*] pasting from clipboard (KEYCODE_PASTE 279)...")
+        # Use Windows clipboard API directly (handles Chinese/Unicode correctly)
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+        k32 = ctypes.windll.kernel32
+        u32 = ctypes.windll.user32
+        k32.GlobalAlloc.restype = ctypes.c_size_t
+        k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalLock.argtypes = [ctypes.c_size_t]
+        k32.GlobalUnlock.argtypes = [ctypes.c_size_t]
+        u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        try:
+            data = (text + '\0').encode('utf-16-le')
+            handle = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not handle:
+                raise RuntimeError("GlobalAlloc failed")
+            ptr = k32.GlobalLock(handle)
+            if not ptr:
+                raise RuntimeError("GlobalLock failed")
+            ctypes.memmove(ptr, data, len(data))
+            k32.GlobalUnlock(handle)
+            u32.OpenClipboard(0)
+            u32.EmptyClipboard()
+            u32.SetClipboardData(CF_UNICODETEXT, handle)
+            u32.CloseClipboard()
+        except Exception as e:
+            print(f"[!] Failed to set clipboard: {e}")
+            return False
+        time.sleep(0.3)
         return self._run_adb("shell", "input", "keyevent", "279")
 
     def raw_shell_command(self, *cmd_parts) -> bool:
@@ -157,7 +152,7 @@ class BlueStacksController:
         # Random hold duration
         hold_ms = random.randint(hold_min_ms, hold_max_ms)
         
-        print(f"[*] human tap at ({tap_x}, {tap_y}) → ({end_x}, {end_y}) hold {hold_ms}ms (drift: {drift_x},{drift_y}, move: {move_x},{move_y})")
+        print(f"[*] human tap at ({tap_x}, {tap_y}) to ({end_x}, {end_y}) hold {hold_ms}ms (drift: {drift_x},{drift_y}, move: {move_x},{move_y})")
         
         # Use swipe to simulate tap with movement while holding
         self._run_adb("shell", "input", "touchscreen", "swipe", str(tap_x), str(tap_y), str(end_x), str(end_y), str(hold_ms))
@@ -173,22 +168,8 @@ class BlueStacksController:
         self._run_adb("shell", "input", "text", "c")
         print("[*] if you see 'abc' in the focused field, keyboard input works")
 
-    def set_windows_clipboard(self, text: str) -> bool:
-        """Set the Windows clipboard directly (more reliable than adb clipboard)."""
-        try:
-            ps_cmd = f'Set-Clipboard -Value @"\n{text}\n"@'
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True, text=True, timeout=5, encoding='utf-8', errors='replace'
-            )
-            print(f"[+] Windows clipboard set: {text[:50]}...")
-            return True
-        except Exception as e:
-            print(f"[!] Failed to set Windows clipboard: {e}")
-            return False
-
     def send_message(self, message: str, tap_x: int | None = None, tap_y: int | None = None, send_button_x: int = 1839, send_button_y: int = 529) -> bool:
-        """Send a simple message: tap → set clipboard → paste → click send button.
+        """Send a message: tap input field → type text → click send button.
 
         Args:
             message: Text to send
@@ -200,7 +181,7 @@ class BlueStacksController:
         Returns:
             True if successful
         """
-        print(f"\n[*] ==> START send_message: {message[:60]}...")
+        print(f"\n[*] ==> START send_message")
         
         # Default input coordinates (used when caller doesn't supply tap_x/tap_y)
         default_input_x = 350
@@ -210,35 +191,21 @@ class BlueStacksController:
             tap_y = default_input_y
 
         if tap_x is not None and tap_y is not None:
-            # print(f"[1/4] Tapping input field at ({tap_x}, {tap_y})...")
             self.human_tap(tap_x, tap_y)
             self.random_delay(400, 800)
             # print("[+] Input field tapped")
 
-        # print("[2/5] Setting Windows clipboard...")
-        self.set_windows_clipboard(message)
-        self.random_delay(200, 400)
-        # print("[+] Clipboard set")
-
-        # print("[3/5] Pasting message...")
-        self.paste_from_clipboard()
-        self.random_delay(300, 600)
-        # print("[+] Paste sent")
+        self.type_text(message)
 
         # instead of tapping the send button, press enter in the input field
         # print("[4/5] Pressing Enter to send message...")
         self.human_tap(send_button_x, send_button_y)
         self.random_delay(500, 1000)
-        # print("[+] Enter pressed, message should be sent")
-
-        # print("[5/5] Message sent\n")
         return True
 
 
 if __name__ == "__main__":
-    import time
-
-    # 1. Initialize controller (auto-detect device from adb devices)
+    # 1. Initialize controller (defaults to emulator-5554)
     controller = BlueStacksController()
 
     # 1.5 Test connection
